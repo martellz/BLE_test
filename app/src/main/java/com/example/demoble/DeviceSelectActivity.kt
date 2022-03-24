@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.view.Choreographer
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -18,6 +19,7 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.core.app.ActivityCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
+import java.lang.NullPointerException
 
 class DeviceSelectActivity : ComponentActivity() {
     private val deviceInfoList = mutableStateListOf<DeviceInfo>()
@@ -25,6 +27,8 @@ class DeviceSelectActivity : ComponentActivity() {
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
             // do not need to get the result for launch bluetooth
         }   // lifecycle owners must call register before they are started.
+
+    private val permissionHelper = PermissionHelper(this)
 
     override fun onResume() {
         super.onResume()
@@ -49,7 +53,9 @@ class DeviceSelectActivity : ComponentActivity() {
         return bluetoothManage.adapter
     }
 
-    private fun refreshBondedDeviceList(
+    @SuppressLint("MissingPermission")
+    private suspend fun refreshBondedDeviceList(
+        permissionHelper: PermissionHelper,
         bluetoothAdapter: BluetoothAdapter,
         deviceInfoList: SnapshotStateList<DeviceInfo>
     ) {
@@ -58,39 +64,37 @@ class DeviceSelectActivity : ComponentActivity() {
             val enableBluetoothIntent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
             activityResultLauncher.launch(enableBluetoothIntent)
         }
-        if (ActivityCompat.checkSelfPermission(
-                this,
-                Manifest.permission.BLUETOOTH_CONNECT
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            // TODO: Consider calling
-            //    ActivityCompat#requestPermissions
-            // here to request the missing permissions, and then overriding
-            //   public void onRequestPermissionsResult(int requestCode, String[] permissions,
-            //                                          int[] grantResults)
-            // to handle the case where the user grants the permission. See the documentation
-            // for ActivityCompat#requestPermissions for more details.
-            return
-        }
-        val pairedDevices = bluetoothAdapter.bondedDevices
-        deviceInfoList.clear()
-        if (pairedDevices.isNotEmpty()) {
-            for (device: BluetoothDevice in pairedDevices) {
-                deviceInfoList.add(DeviceInfo(device.name, device.address))
+        if (permissionHelper.request(Manifest.permission.BLUETOOTH_CONNECT,
+                { _, onUserResponse ->
+                    showRequestPermissionRationale(onUserResponse)
+                },
+            this@DeviceSelectActivity) ) {
+            val pairedDevices = bluetoothAdapter.bondedDevices
+            deviceInfoList.clear()
+            if (pairedDevices.isNotEmpty()) {
+                for (device: BluetoothDevice in pairedDevices) {
+                    deviceInfoList.add(DeviceInfo(device.name, device.address))
+                }
+            } else {
+                Toast.makeText(this, "没有已配对的蓝牙设备，请先配对!", Toast.LENGTH_SHORT).show()
             }
-        } else {
-            Toast.makeText(this, "没有已配对的蓝牙设备，请先配对!", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun onRefreshDevice() {
         val bluetoothAdapter = getBluetoothAdapter()
-        refreshBondedDeviceList(bluetoothAdapter, deviceInfoList)
+        lifecycleScope.launch {
+            refreshBondedDeviceList(permissionHelper, bluetoothAdapter, deviceInfoList)
+        }
     }
 
     private fun onClickDevice(deviceInfo: DeviceInfo) {
         val intent = Intent(this, BleActivity::class.java) //对象获取
         intent.putExtra(BleActivity.BLUETOOTH_ADDRESS, deviceInfo.address)
         this.startActivity(intent)
+    }
+
+    private fun showRequestPermissionRationale(onUserResponse: (Boolean) -> Unit) {
+        Choreographer.getInstance().postFrameCallback { onUserResponse(true) }
     }
 }
