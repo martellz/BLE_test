@@ -7,230 +7,71 @@ import android.content.Context
 import android.os.Bundle
 import android.util.Log
 import android.view.Choreographer
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.Button
 import androidx.compose.material.Text
 import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
+import com.beepiz.bluetooth.gattcoroutines.BGC
+import com.beepiz.bluetooth.gattcoroutines.GattConnection
 import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.channels.consume
-import kotlinx.coroutines.channels.consumeEach
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.consumeAsFlow
+import kotlinx.coroutines.flow.*
 import java.lang.Exception
-import java.lang.Integer.max
-import java.lang.Integer.min
 import java.util.*
 
 class BleActivity : ComponentActivity() {
     companion object {
         private const val TAG = "BleDemo"
         private const val GATT_MAX_MTU_SIZE = 23
-        const val SERVICE_NORMAL_UUID =
+        const val SERVICE_UUID =
             "99a8e970-aa52-11ec-b909-0242ac120002"
-//            "0000ff00-0000-1000-8000-00805f9b34fb"
-        const val CHARACTER_NORMAL_UUID =
+
+        //            "0000ff00-0000-1000-8000-00805f9b34fb"
+        const val CHARACTER_WRITE_UUID =
 //            "0000ff01-0000-1000-8000-00805f9b34fb"
             "f2b4d622-aa53-11ec-b909-0242ac120002"
-//            "00000009-09da-4bed-9652-f507366fcfc5"
-        const val CHARACTER_DATA_UP_UUID =
+
+        //            "00000009-09da-4bed-9652-f507366fcfc5"
+        const val CHARACTER_POSITION_UUID =
 //            "0000ff01-0000-1000-8000-00805f9b34fb"
 //        "00000007-09da-4bed-9652-f507366fcfc5"
             "cb100916-b274-47d4-b094-0372d72a3782"
-        const val CCC_DESCRIPTOR_UUID = "00002902-0000-1000-8000-00805f9b34fb"
+//        const val CCC_DESCRIPTOR_UUID = "00002902-0000-1000-8000-00805f9b34fb"
+
+        const val CHARACTER_ENA_UUID = "F0447137-02E5-C6E3-AD39-648B4BBD6975"
+        const val CHARACTER_SPD_UUID = "CC81FE52-7474-ADA3-AE54-1622FD7E3FD3"
+
+        const val LEGACY_UUID = "00001101-0000-1000-8000-00805F9B34FB"
 
         const val BLUETOOTH_ADDRESS: String = "DeviceAddress"
     }
 
     private val bluetoothAddress =
         if (intent != null)
-            intent.getStringExtra("BLUETOOTH_ADDRESS")!! else "7C:9E:BD:72:30:9E" //"A4:4B:D5:7C:76:D7" // "EC:94:CB:7A:36:3A" //
-    private lateinit var bluetoothManage: BluetoothManager
-    private lateinit var device: BluetoothDevice
+            intent.getStringExtra("BLUETOOTH_ADDRESS")!! else "EC:94:CB:7A:36:3A" //"7C:9E:BD:72:30:9E" //"A4:4B:D5:7C:76:D7" //
+    private var bluetoothManage: BluetoothManager? = null
+    private var device: BluetoothDevice? = null
     private var ourBluetoothGatt: BluetoothGatt? = null
     private var ourBluetoothGattService: BluetoothGattService? = null
     private var ourNormalCharacteristic: BluetoothGattCharacteristic? = null
     private var ourDataUpCharacteristic: BluetoothGattCharacteristic? = null
     private val permissionHelper = PermissionHelper(this)
-
-    data class BleResult(val value: ByteArray?, val status: Int)
-
-    private val channel = Channel<BleResult>()
-//    private val channelForRepeating = Channel<ByteArray>()
-    private val characteristicChangedFlow = MutableSharedFlow<BluetoothGattCharacteristic>(extraBufferCapacity = 1)
+    private var bleGattConnect: GattConnection? = null
 
     private val dataUpMessage = mutableStateListOf("data up message")
-    private val normalMessage = mutableStateOf("normal message\n")
+    private val normalMessage = mutableStateListOf("normal message\n")
 
-    private val gattCallback = object : BluetoothGattCallback() {
-        @SuppressLint("MissingPermission")
-        override fun onConnectionStateChange(
-            gatt: BluetoothGatt?,
-            status: Int,
-            newState: Int
-        ) {
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
-                // successfully connected to the GATT Server
-                Log.d(TAG, "Connected to device")
-                gatt?.discoverServices()
-                ourBluetoothGatt = gatt
-//                gatt?.requestMtu(GATT_MAX_MTU_SIZE)
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                // disconnected from the GATT Server
-                Log.d(TAG, "Disconnected from device")
-                ourBluetoothGatt = null
-            }
-        }
+    private var dataUpFlow: Flow<BGC>? = null
 
-        @SuppressLint("MissingPermission")
-        override fun onServicesDiscovered(gatt: BluetoothGatt?, status: Int) {
-            //super.onServicesDiscovered(gatt, status)
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.d(TAG, "Found # services: " + gatt?.services?.size)
-                gatt?.printGattTable()
-                gatt?.services?.forEach {
-                    Log.d(TAG, "" + it.uuid)
-                    if (SERVICE_NORMAL_UUID == it.uuid.toString()) {
-                        Log.d(TAG, "we found our service!")
-
-                        val service = gatt.getService(it.uuid)
-                        if (service == null) {
-                            Log.e(TAG, "Did not get our service")
-                        }
-                        Log.d(TAG, "we got our service!")
-                        ourBluetoothGattService = service
-
-                        if (service != null) {
-                            val charaNormal = service.getCharacteristic(
-                                    UUID.fromString(CHARACTER_NORMAL_UUID)
-                                )
-
-                            if (charaNormal != null) {
-                                ourNormalCharacteristic = charaNormal
-                                lifecycleScope.launch(Dispatchers.IO) {
-                                    repeat(1000) { iter->
-                                        delay(500)
-                                        val payload = byteArrayOf(
-                                            (iter%256).toByte()
-                                        )
-                                        val writeResult = ourBluetoothGatt?.writeCharacteristic(payload)
-                                        normalMessage.value += "write: ${payload.toHexString()}\n"
-
-                                        Log.d(
-                                            "BleDemoCoroutine",
-                                            "write value= ${writeResult?.value}, status=${writeResult?.status}"
-                                        )
-
-                                        delay(500)
-                                        val readResult = ourBluetoothGatt?.readCharacteristic()
-                                        normalMessage.value += "receive: ${readResult?.value?.toHexString()}\n"
-                                        Log.d(
-                                            "BleDemoCoroutine",
-                                            "value= ${readResult?.value?.toHexString()}, status=${readResult?.status}"
-                                        )
-                                    }
-
-                                    withContext(Dispatchers.Main) {
-                                        Log.d(TAG, "${ourDataUpCharacteristic?.isNotifiable()}...")
-                                    }
-                                }
-                            }
-
-                            val charaDataUp = service.getCharacteristic(
-                                UUID.fromString(CHARACTER_DATA_UP_UUID)
-                            )
-
-                            if (charaDataUp != null) {
-                                ourDataUpCharacteristic = charaDataUp
-                                enableNotifications(charaDataUp)
-                            }
-
-
-                        } else {
-                            Log.e(TAG, "Did not find our service")
-                        }
-                    }
-                }
-            } else {
-                Log.e(TAG, "Failure while scan for services")
-            }
-
-        }
-
-        override fun onCharacteristicRead(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            status: Int
-        ) {
-            when (status) {
-                BluetoothGatt.GATT_SUCCESS -> {
-                    Log.d(
-                        TAG,
-                        "CharacteristicRead " + characteristic.uuid
-                    )
-                    val value = characteristic.value    // byte[]
-                    Log.d(TAG, "Value=${value.toHexString()}")
-                    if (characteristic.uuid == UUID.fromString(CHARACTER_NORMAL_UUID))
-                        channel.trySend(BleResult(characteristic.value, status))
-                }
-                BluetoothGatt.GATT_READ_NOT_PERMITTED -> {
-                    Log.e(
-                        TAG,
-                        "Read not permitted for $CHARACTER_NORMAL_UUID!"
-                    )
-                }
-                else -> {
-                    Log.e(
-                        TAG,
-                        "Characteristic read failed for $CHARACTER_NORMAL_UUID, error: $status"
-                    )
-                }
-            }
-        }
-
-        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-            super.onMtuChanged(gatt, mtu, status)
-            Log.d(TAG, "MTU changed to $mtu")
-        }
-
-        override fun onCharacteristicWrite(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            status: Int
-        ) {
-            super.onCharacteristicWrite(gatt, characteristic, status)
-            Log.d(TAG, "write characteristic")
-            if (characteristic.uuid == UUID.fromString(CHARACTER_NORMAL_UUID))
-                channel.trySend(BleResult(null, status))
-        }
-
-        override fun onCharacteristicChanged(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic
-        ) {
-            super.onCharacteristicChanged(gatt, characteristic)
-//            if (characteristic.uuid == UUID.fromString(CHARACTER_DATA_UP_UUID))
-//                Log.d("BleDemoCoroutine", "send ${characteristic.value} to channel")
-//            this@BleActivity.lifecycleScope.launch {
-//                channelForRepeating.trySend(characteristic.value)
-//            }
-            if (dataUpMessage.size > 256) dataUpMessage.remove(dataUpMessage[0])
-            dataUpMessage.add(characteristic.value.toHexString())
-        }
-    }
+    private var dataUpJob: Job? = null
+    private var normalJob: Job? = null
 
     @SuppressLint("MissingPermission")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -238,50 +79,200 @@ class BleActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         bluetoothManage = this.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-        device = bluetoothManage.adapter.getRemoteDevice(bluetoothAddress)
+        device = bluetoothManage!!.adapter.getRemoteDevice(bluetoothAddress)
 
-        Toast.makeText(this, bluetoothAddress, Toast.LENGTH_SHORT).show()
-
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                if (permissionHelper.request(
-                        Manifest.permission.BLUETOOTH_SCAN,
-                        { _, onUserResponse ->
-                            showRequestPermissionRationale(onUserResponse)
-                        },
-                        this@BleActivity
-                    )
-                    && permissionHelper.request(
-                        Manifest.permission.BLUETOOTH_CONNECT,
-                        { _, onUserResponse ->
-                            showRequestPermissionRationale(onUserResponse)
-                        },
-                        this@BleActivity
-                    )
-                ) {
-                    device.connectGatt(this@BleActivity, true, gattCallback)
-
-//                    ourBluetoothGatt?.disconnect()
-//                    ourBluetoothGatt?.close()
-//                    ourBluetoothGatt = null
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, e.toString())
-                e.printStackTrace()
-            } finally {
-//                ourBluetoothGatt?.disconnect()
-//                ourBluetoothGatt?.close()
-//                ourBluetoothGatt = null
-            }
-        }
+        Log.d(TAG, "device type: ${device!!.type}")
+        Log.d(
+            TAG,
+            "type: ${BluetoothDevice.DEVICE_TYPE_CLASSIC}, ${BluetoothDevice.DEVICE_TYPE_LE}, ${BluetoothDevice.DEVICE_TYPE_DUAL}"
+        )
 
         setContent {
             Column {
                 Greeting2("Android")
 
-                Row{
-                    LazyColumn{
-                        items(listOf(normalMessage.value)){item ->
+                Button(modifier = Modifier.fillMaxWidth(), onClick = {
+                    lifecycleScope.launch {
+                        try {
+                            if (permissionHelper.request(
+                                    Manifest.permission.BLUETOOTH_SCAN,
+                                    { _, onUserResponse ->
+                                        showRequestPermissionRationale(onUserResponse)
+                                    },
+                                    this@BleActivity
+                                )
+                                && permissionHelper.request(
+                                    Manifest.permission.BLUETOOTH_CONNECT,
+                                    { _, onUserResponse ->
+                                        showRequestPermissionRationale(onUserResponse)
+                                    },
+                                    this@BleActivity
+                                )
+                            ) {
+
+                                val myDevice =
+                                    bluetoothManage!!.adapter.getRemoteDevice(bluetoothAddress)
+                                val connection = GattConnection(
+                                    myDevice!!,
+                                    GattConnection.ConnectionSettings(
+                                        autoConnect = false,
+                                        transport = BluetoothDevice.TRANSPORT_LE
+                                    )
+                                )
+                                bleGattConnect = connection
+
+                                val connectResult = withTimeoutOrNull(10000) {
+                                    connection.connect()
+                                    Log.d(TAG, "is connected: ${bleGattConnect?.isConnected}")
+                                    true
+                                }
+
+                                if (connectResult == null) {
+                                    Log.d(TAG, "connect failed, out of time")
+                                    return@launch
+                                }
+
+
+                                val services = connection.discoverServices()
+                                services.forEach { service ->
+                                    Log.d(TAG, "service: ${service.uuid}")
+                                    service.characteristics.forEach {
+                                        Log.d(TAG, "chara: ${it.uuid}")
+                                    }
+                                    Log.d(TAG, "-----------------------------")
+                                }
+
+                                val gattService =
+                                    connection.getService(UUID.fromString(SERVICE_UUID))
+                                if (gattService == null) {
+                                    Log.d(TAG, "did not find our service!")
+                                    return@launch
+                                }
+
+                                val writeChara = gattService.getCharacteristic(
+                                    UUID.fromString(CHARACTER_WRITE_UUID)
+                                )
+                                val positionChara = gattService.getCharacteristic(
+                                    UUID.fromString(CHARACTER_POSITION_UUID)
+                                )
+                                val enableChara = gattService.getCharacteristic(
+                                    UUID.fromString(CHARACTER_ENA_UUID)
+                                )
+                                val speedChara = gattService.getCharacteristic(
+                                    UUID.fromString(CHARACTER_SPD_UUID)
+                                )
+
+                                val enableFlow = connection.notifications(enableChara, true)
+                                val positionFlow = connection.notifications(positionChara, true)
+                                val speedFlow = connection.notifications(speedChara, true)
+
+
+                                normalJob = launch {
+                                    repeat(1000) {
+                                        setTargetPosition(it, connection, writeChara)
+//                                        writeChara.value =
+//                                            byteArrayOf(
+//                                                0xff.toByte(),
+//                                                0x01.toByte(),
+//                                                0x01.toByte(),
+//                                                0x02.toByte(),
+//                                                0x04.toByte(),
+//
+//                                                0xfe.toByte()
+//                                            )
+////                                            val calendar1 = Calendar.getInstance()
+//                                        connection.writeCharacteristic(writeChara)
+                                        delay(500)
+                                    }
+//                                            val calendar2 = Calendar.getInstance()
+//                                            val readChara =
+//                                                connection.readCharacteristic(enableCharacteristic)
+//                                            val calendar3 = Calendar.getInstance()
+//                                            normalMessage.add(
+//                                                "cost:${
+////                                                    calendar2.get(Calendar.MILLISECOND) - calendar1.get(
+////                                                        Calendar.MILLISECOND
+////                                                    )
+//                                                }:${
+//                                                    calendar3.get(Calendar.MILLISECOND) - calendar2.get(
+//                                                        Calendar.MILLISECOND
+//                                                    )
+//                                                }: " + readChara.value.toHexString()
+//                                            )
+//                                        }
+                                }
+//                                connection.disconnect()
+                                connection.close()
+                                delay(2000)
+
+
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, e.toString())
+                            e.printStackTrace()
+                        } finally {
+
+                        }
+                    }
+                }) {
+                    Text(text = "start connection")
+                }
+
+                Button(modifier = Modifier.fillMaxWidth(), onClick = {
+                    lifecycleScope.launch {
+                        val connection = bleGattConnect ?: return@launch
+                        val gattService =
+                            connection.getService(UUID.fromString(SERVICE_UUID))
+                        if (gattService == null) {
+                            Log.d(TAG, "did not find our service!")
+                            return@launch
+                        }
+
+                        val dataUpCharacteristic = gattService.getCharacteristic(
+                            UUID.fromString(CHARACTER_POSITION_UUID)
+                        )
+
+                        connection.setCharacteristicNotificationsEnabled(
+                            dataUpCharacteristic,
+                            true
+                        )
+                        connection.setCharacteristicNotificationsEnabledOnRemoteDevice(
+                            dataUpCharacteristic,
+                            true
+                        )
+                        dataUpFlow = connection.notifications(dataUpCharacteristic, true)
+
+                        dataUpJob = launch {
+                            dataUpFlow?.collect {
+                                val calendar = Calendar.getInstance()
+                                dataUpMessage.add(
+                                    "${calendar.get(Calendar.MINUTE)}:${
+                                        calendar.get(
+                                            Calendar.SECOND
+                                        )
+                                    }:${calendar.get(Calendar.MILLISECOND)}>" + it.value.toHexString()
+                                )
+                            }
+                        }
+                        Log.d(TAG, "is connected: ${bleGattConnect?.isConnected}")
+                    }
+                }) {
+                    Text(text = "open data up")
+                }
+
+                Button(modifier = Modifier.fillMaxWidth(), onClick = {
+                    normalJob?.cancel()
+                    dataUpJob?.cancel()
+                    bleGattConnect?.close()
+
+                    Log.d(TAG, "is connected: ${bleGattConnect?.isConnected}")
+                }) {
+                    Text(text = "close connection")
+                }
+
+                Row {
+                    LazyColumn {
+                        items(normalMessage) { item ->
                             Text(text = item, modifier = Modifier.fillMaxWidth(0.5f))
                         }
                     }
@@ -290,7 +281,6 @@ class BleActivity : ComponentActivity() {
                         items(dataUpMessage) { item ->
                             Text(text = item)
                         }
-
 
                     }
                 }
@@ -310,12 +300,6 @@ class BleActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private suspend fun waitForResult(): BleResult {
-        return withTimeout(1000) {
-            channel.receive()
-        }
-    }
-
 //    @OptIn(ExperimentalCoroutinesApi::class)
 //    private suspend fun receivingRepeatingPosition(): ByteArray? {
 //        return withTimeoutOrNull(1000) {
@@ -328,49 +312,6 @@ class BleActivity : ComponentActivity() {
 
 //    }
 
-    @SuppressLint("MissingPermission")
-    private suspend fun BluetoothGatt.readCharacteristic(): BleResult? {
-        val chara = ourNormalCharacteristic ?: return null
-
-        readCharacteristic(chara)
-        return waitForResult()
-    }
-
-    @SuppressLint("MissingPermission")
-    private suspend fun BluetoothGatt.writeCharacteristic(payload: ByteArray): BleResult? {
-        val chara = ourNormalCharacteristic ?: return null
-
-        val writeType = when {
-            chara.isWritable() -> BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            chara.isWritableWithoutResponse() -> BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-            else -> error("not writable BLE device")
-        }
-
-        chara.writeType = writeType
-        chara.value = payload
-        this.writeCharacteristic(chara)
-
-        return waitForResult()
-    }
-
-    private fun BluetoothGatt.printGattTable() {
-        if (services.isEmpty()) {
-            Log.i(
-                TAG,
-                "No service and characteristic available, call discoverServices() first?"
-            )
-            return
-        }
-        services.forEach { service ->
-            val characteristicsTable = service.characteristics.joinToString(
-                separator = "\n|--",
-                prefix = "|--"
-            ) { it.uuid.toString() }
-            Log.d(
-                TAG, "\nService ${service.uuid}\nCharacteristics:\n$characteristicsTable"
-            )
-        }
-    }
 
     fun BluetoothGatt.findCharacteristic(uuid: UUID): BluetoothGattCharacteristic? {
         services?.forEach { service ->
@@ -391,34 +332,77 @@ class BleActivity : ComponentActivity() {
         } ?: error("Not connected to a BLE device!")
     }
 
-    @SuppressLint("MissingPermission")
-    fun enableNotifications(characteristic: BluetoothGattCharacteristic) {
-        val cccdUuid = UUID.fromString(CCC_DESCRIPTOR_UUID)
-        val payload = when {
-            characteristic.isIndicatable() -> BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
-            characteristic.isNotifiable() -> BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-            else -> {
-                Log.e(
-                    "ConnectionManager",
-                    "${characteristic.uuid} doesn't support notifications/indications"
-                )
-                return
-            }
-        }
+//    @SuppressLint("MissingPermission")
+//    fun enableNotifications(characteristic: BluetoothGattCharacteristic) {
+//        val cccdUuid = UUID.fromString(CCC_DESCRIPTOR_UUID)
+//        val payload = when {
+//            characteristic.isIndicatable() -> BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+//            characteristic.isNotifiable() -> BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+//            else -> {
+//                Log.e(
+//                    "ConnectionManager",
+//                    "${characteristic.uuid} doesn't support notifications/indications"
+//                )
+//                return
+//            }
+//        }
+//
+//        characteristic.getDescriptor(cccdUuid)?.let { cccDescriptor ->
+//            if (ourBluetoothGatt?.setCharacteristicNotification(characteristic, true) == false) {
+//                Log.e(
+//                    "ConnectionManager",
+//                    "setCharacteristicNotification failed for ${characteristic.uuid}"
+//                )
+//                return
+//            }
+//            writeDescriptor(cccDescriptor, payload)
+//        } ?: Log.e(
+//            "ConnectionManager",
+//            "${characteristic.uuid} doesn't contain the CCC descriptor!"
+//        )
+//    }
 
-        characteristic.getDescriptor(cccdUuid)?.let { cccDescriptor ->
-            if (ourBluetoothGatt?.setCharacteristicNotification(characteristic, true) == false) {
-                Log.e(
-                    "ConnectionManager",
-                    "setCharacteristicNotification failed for ${characteristic.uuid}"
-                )
-                return
-            }
-            writeDescriptor(cccDescriptor, payload)
-        } ?: Log.e(
-            "ConnectionManager",
-            "${characteristic.uuid} doesn't contain the CCC descriptor!"
+
+    private val PACKET_END_BYTE = 0xFE.toByte()
+
+    class Header(command: Int, dataLength: Int) {
+        private val PACKET_START_BYTE = 0xFF.toByte()
+        private val PROTOCOL_VERSION_BYTE = 0x01.toByte()
+        private val MOTOR_ID_BYTE = 0x01.toByte()
+
+        var headerArray = byteArrayOf(
+            PACKET_START_BYTE,
+            PROTOCOL_VERSION_BYTE,
+            MOTOR_ID_BYTE,
+            command.toByte(),
+            dataLength.toByte()
         )
+    }
+
+    suspend fun setTargetPosition(
+        position: Int,
+        gattConnection: GattConnection,
+        characteristic: BluetoothGattCharacteristic
+    ) {
+        val header = Header(0x02, 0x04)
+
+        characteristic.value =
+            byteArrayOf(
+                *header.headerArray,
+                *intToByteArray(position, 0x04),
+                PACKET_END_BYTE
+            )
+        gattConnection.writeCharacteristic(characteristic)
+    }
+
+    private fun intToByteArray(int: Int, dataLength: Int): ByteArray {
+        var i = 0
+        val byteArray = ByteArray(dataLength)
+        while (i < dataLength) {
+            byteArray[i] = (int shr (8 * (dataLength - 1 - i))).toByte()
+            i++
+        }
+        return byteArray
     }
 
     fun BluetoothGattCharacteristic.isReadable(): Boolean =
